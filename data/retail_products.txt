@@ -1,0 +1,76 @@
+### SKU-E001
+Dell XPS 15 laptop, 13th gen Intel Core i7-13700H processor, 32GB RAM, 1TB SSD.
+15.6 inch 3.5K OLED touchscreen display. Dedicated NVIDIA RTX 4050 graphics.
+Weighs 1.92 kg. Comes with Windows 11 Home pre-installed. Price: Rs 1,24,990.
+Brand: Dell. Category: Electronics > Laptops.
+
+### SKU-E002
+boAt Rockerz 450 wireless on-ear headphones with 15 hours playback, Bluetooth
+v5.0, padded ear cushions for comfort. Available in Black/Red colourway.
+Price: Rs 1,499. In stock.
+
+### SKU-E003
+power bank, 20000mAh capacity, dual USB-A output + 1 USB-C input/output,
+18W fast charging support. Compact and travel-friendly. INR 1,299.00.
+Brand: Mi (Xiaomi).
+
+### SKU-E004
+Samsung Crystal 4K UHD Smart TV, 55 inch class, built-in Alexa, 3 HDMI ports.
+Price: one lakh ten thousand rupees. Great for home entertainment or as a
+central display unit — vendor unsure whether to list under Electronics or
+Home Entertainment, please advise on category.
+
+### SKU-E005
+[Partial submission — vendor to complete] Wireless mechanical keyboard,
+hot-swappable switches, RGB backlight. Remaining fields pending from vendor;
+price and brand not yet confirmed.
+
+### SKU-A001
+चिकनकारी कुर्ती (Chikankari Kurti), hand-embroidered cotton kurti, Lucknowi
+craft, available in sizes S-XXL, pastel colourways. Machine wash cold,
+line dry. Price: Rs 899. Category: Apparel > Women's Ethnic Wear.
+
+### SKU-A002
+Titan Kairos men's analog watch, quartz movement, genuine leather strap,
+stainless steel case with gold-tone plating, 42mm case size, champagne dial.
+Water resistant to 30m (splash resistant only, not for swimming). Price:
+Rs 3,495. Brand: Titan.
+
+### SKU-A003
+बनारसी साड़ी (Banarasi Saree), pure silk blend, zari border, traditional
+Varanasi weave. Dry clean only — do not machine wash. Price: Rs 4,250.
+Brand: Fabindia. Comes in a set with matching blouse piece.
+
+### SKU-A004
+Men's bomber jacket, water-resistant shell fabric, ribbed cuffs and hem,
+interior zip pocket. [Vendor submission cut off — sizing chart and price
+to follow in next batch upload.]
+
+### SKU-H001
+Non-stick cookware set, 3 pieces — frying pan, kadai, and tawa. Induction
+compatible base, 2-year non-stick coating warranty. Price: Rs 2,999.
+Brand: Prestige.
+
+### SKU-H002
+LED table lamp, adjustable arm, 3 brightness levels, USB charging port
+built into base, touch-sensitive on/off switch. Price: Rs 1,199.
+Category: Homeware > Lighting.
+
+### SKU-H003
+Prestige Svachh 5 litre pressure cooker, stainless steel outer body,
+induction-compatible tri-ply base, integrated spillage-control safety valve.
+ISI certified (IS 2347:2017). Price: Rs 2,199. Brand: Prestige.
+
+### SKU-B001
+Himalaya Purifying Neem Face Wash, 150ml, for oily and acne-prone skin,
+paraben-free formula. Suitable for daily use. Price: Rs 165.
+Brand: Himalaya Herbals.
+
+### SKU-B002
+Lakme Eyeconic Kajal, deep black pigment, smudge-proof and waterproof
+formula, 12-hour stay claim. Price: Rs 220. Brand: Lakme.
+
+### SKU-S001
+Yonex Arcsaber badminton racket, graphite frame, medium flex, strung at
+24 lbs tension, includes half-cover. Price: Rs 3,999. Brand: Yonex.
+Category: Sports > Badminton.
