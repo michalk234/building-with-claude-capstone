@@ -444,7 +444,83 @@ def build_tools() -> list[dict]:
       "additionalProperties": False
     - Descriptions matter — Claude reads them to decide when and how to call the tool
     """
-    raise NotImplementedError("Phase 3 ▸ implement build_tools()")
+    return [
+        {
+            "name": "check_credit_score",
+            "description": (
+                "Check the applicant's credit score and risk band using their "
+                "PAN card number. Use this tool before making a preliminary "
+                "loan decision. The tool may return an error when the credit "
+                "bureau is unavailable or the PAN cannot be found."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "pan_number": {
+                        "type": "string",
+                        "description": (
+                            "The applicant's PAN card number, for example "
+                            "PAN-ABCDE1234F."
+                        ),
+                    },
+                },
+                "required": ["pan_number"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "validate_documents",
+            "description": (
+                "Validate an applicant document and determine whether it is "
+                "valid, when it expires, and why it passed or failed validation. "
+                "Call this tool separately for each document that needs checking."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "doc_type": {
+                        "type": "string",
+                        "description": (
+                            "The type of document to validate, for example "
+                            "aadhaar, pan, or salary_slip."
+                        ),
+                    },
+                    "doc_id": {
+                        "type": "string",
+                        "description": (
+                            "The document identifier or number, for example "
+                            "AADHAAR-1234."
+                        ),
+                    },
+                },
+                "required": ["doc_type", "doc_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "lookup_existing_account",
+            "description": (
+                "Look up the applicant's existing Apex Bank account information, "
+                "including active loans, total existing monthly EMI, and days "
+                "past due. Use this tool before assessing the applicant's current "
+                "debt obligations and repayment history."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "customer_id": {
+                        "type": "string",
+                        "description": (
+                            "The applicant's Apex Bank customer ID, for example "
+                            "CUST-001."
+                        ),
+                    },
+                },
+                "required": ["customer_id"],
+                "additionalProperties": False,
+            },
+        },
+    ]
 
 
 def run_agentic_loop(
@@ -479,8 +555,58 @@ def run_agentic_loop(
     - Append response.content (the list), NOT response.content[0].text
     - Tool result content must be json.dumps(result) — a string, not a dict
     """
-    raise NotImplementedError("Phase 3 ▸ implement run_agentic_loop()")
+    messages = list(conversation_history)
+    messages.append({
+        "role": "user",
+        "content": (
+            "Please look up the customer's credit score, validate "
+            "their documents, and check their existing account "
+            "before making your assessment."
+        ),
+    })
 
+    while True:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            tools=tools,
+            messages=messages,
+        )
+
+        if response.stop_reason == "end_turn":
+            break
+
+        messages.append({
+            "role": "assistant",
+            "content": response.content,
+        })
+
+        tool_results = []
+
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+
+            print(f"\n  Tool call: {block.name}")
+            print(f"  Input: {block.input}")
+
+            tool_function = TOOL_FN_MAP[block.name]
+            result = tool_function(**block.input)
+            is_error = "error" in result
+
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": json.dumps(result),
+                "is_error": is_error,
+            })
+
+        messages.append({
+            "role": "user",
+            "content": tool_results,
+        })
+
+    return messages    
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 4 — RAG Policy Grounding (Day 3–4 skills)
@@ -623,8 +749,7 @@ def run_evaluation(
 def main() -> None:
     # ── Phase 1: Initialise ────────────────────────────────────────────────────
     client = make_client()
-    #tools = build_tools()         # to be uncommented after developing ph3 # Phase 3 — safe to call empty list until then
-    tools: list[dict] = []  # to be removed after developing ph3 # 
+    tools = build_tools()          # Phase 3 — safe to call empty list until then 
 
     # ── Phase 4: Build policy index ───────────────────────────────────────────
     # Comment this block out until Phase 4 is implemented:
@@ -649,9 +774,8 @@ def main() -> None:
     print(f"\n  Estimated cost: ${cost:.4f}")
 
     # Phase 3: enrich with tool calls
-    #messages = run_agentic_loop(client, history, tools)  # to be uncommented after developing ph3 
-    messages = list(history)  # to be removed after developing ph3
-    
+    messages = run_agentic_loop(client, history, tools)  
+
     # Phase 2: extract the validated record
     record = extract_application_record(client, messages, policy_context)
     print(f"\n  Decision : {record.preliminary_decision}")
