@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError, field_validator
 
 import anthropic
+import openai
 
 # ── Constants (provided) ───────────────────────────────────────────────────────
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
@@ -152,7 +153,7 @@ LOAN_OFFICER_SYSTEM = """You are an Apex Bank loan intake officer.
     Do not give a preliminary decision until all applicable data is collected.
     Cite [Policy Section X.Y] for every eligibility rule. Never invent rules.
 
-    Policy:
+    [Policy Context]:
     {policy_context}"""
 
 
@@ -633,8 +634,116 @@ def build_policy_index(policy_path: str = "data/loan_processing_sop.md") -> obje
     Hint: the lazy imports mean the file still runs without an OpenAI key
     when only Phase 1–3 features are exercised.
     """
-    raise NotImplementedError("Phase 4 ▸ implement build_policy_index()")
 
+    import chromadb
+    import openai
+
+    chunk_size = 400
+    overlap = 50
+    embedding_model = "text-embedding-3-small"
+    collection_name = "apex_bank_policy"
+
+    policy_text = Path(policy_path).read_text(encoding="utf-8")
+
+    version_match = re.search(
+        r"\*\*Version:\*\*\s*([^|\n]+)",
+        policy_text,
+    )
+    policy_version = (
+        version_match.group(1).strip()
+        if version_match
+        else "unknown"
+    )
+
+    # Preserve top-level policy sections before applying fixed-size chunking.
+    section_blocks = [
+        block.strip()
+        for block in re.split(
+            r"(?=^## Section )",
+            policy_text,
+            flags=re.MULTILINE,
+        )
+        if block.lstrip().startswith("## Section ")
+    ]
+
+    chunks = []
+    step = chunk_size - overlap
+
+    for section_block in section_blocks:
+        heading, _, _ = section_block.partition("\n")
+        section_title = (
+            heading
+            .removeprefix("## ")
+            .removeprefix("Section ")
+            .strip()
+        )
+
+        words = section_block.split()
+
+        for start in range(0, len(words), step):
+            chunk_text = " ".join(words[start:start + chunk_size])
+
+            chunks.append({
+                "text": chunk_text,
+                "section_title": section_title,
+                "chunk_index": len(chunks),
+                "loan_type": "all",
+                "policy_version": policy_version,
+            })
+
+            if start + chunk_size >= len(words):
+                break
+
+    if not chunks:
+        raise ValueError(
+            f"No policy sections found in {policy_path!r}."
+        )
+
+    openai_client = openai.OpenAI()
+    embedding_response = openai_client.embeddings.create(
+        input=[chunk["text"] for chunk in chunks],
+        model=embedding_model,
+    )
+    embeddings = [
+        item.embedding
+        for item in embedding_response.data
+    ]
+
+    chroma_client = chromadb.PersistentClient(path="./chroma_data")
+
+    # Rebuilding the index should not leave old chunks or duplicate IDs.
+    try:
+        chroma_client.delete_collection(collection_name)
+    except Exception:
+        pass
+
+    collection = chroma_client.get_or_create_collection(
+        name=collection_name,
+        configuration={"hnsw": {"space": "cosine"}},
+    )
+
+    collection.add(
+        ids=[
+            f"policy-{chunk['chunk_index']}"
+            for chunk in chunks
+        ],
+        embeddings=embeddings,
+        documents=[
+            chunk["text"]
+            for chunk in chunks
+        ],
+        metadatas=[
+            {
+                "section_title": chunk["section_title"],
+                "chunk_index": chunk["chunk_index"],
+                "loan_type": chunk["loan_type"],
+                "policy_version": chunk["policy_version"],
+            }
+            for chunk in chunks
+        ],
+    )
+
+    return collection
 
 def retrieve_policy_context(query: str, store: object, top_k: int = TOP_K_CHUNKS) -> str:
     """Retrieve the top-k policy chunks most relevant to the query.
@@ -651,8 +760,32 @@ def retrieve_policy_context(query: str, store: object, top_k: int = TOP_K_CHUNKS
     This string replaces {policy_context} in LOAN_OFFICER_SYSTEM and is also
     passed to extract_application_record() so the extraction prompt sees policy text.
     """
-    raise NotImplementedError("Phase 4 ▸ implement retrieve_policy_context()")
 
+    client = openai.OpenAI()
+    embedding_response = client.embeddings.create(
+        input=[query],
+        model="text-embedding-3-small",
+    )
+    query_embedding = embedding_response.data[0].embedding
+
+    results = store.query(
+        query_embeddings=[query_embedding],
+        n_results=top_k,
+    )
+
+    documents = results["documents"][0]
+    metadatas = results["metadatas"][0]
+
+    formatted_chunks = []
+
+    for document, metadata in zip(documents, metadatas):
+        formatted_chunks.append(
+            f"[Policy Section {metadata['section_title']}, "
+            f"chunk {metadata['chunk_index']}]\n"
+            f"{document}"
+        )
+
+    return "\n\n".join(formatted_chunks)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 5 — Evaluation (Day 4 skills)
@@ -753,10 +886,10 @@ def main() -> None:
 
     # ── Phase 4: Build policy index ───────────────────────────────────────────
     # Comment this block out until Phase 4 is implemented:
-    # store = build_policy_index()
+    store = build_policy_index()
 
     # For Phase 1–3, use an empty policy context:
-    store = None
+    #store = None
     policy_context = ""
 
     # ── Run one scenario end-to-end ────────────────────────────────────────────
