@@ -131,7 +131,12 @@ def make_client() -> anthropic.Anthropic:
     - Raise EnvironmentError with a descriptive message if it is absent
     - Return anthropic.Anthropic() — no api_key= argument; SDK reads env automatically
     """
-    raise NotImplementedError("Phase 1 ▸ implement make_client()")
+    load_dotenv()
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise EnvironmentError(
+            "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and add your key."
+        )
+    return anthropic.Anthropic()
 
 
 # Write your system prompt here.
@@ -139,25 +144,16 @@ def make_client() -> anthropic.Anthropic:
 # Leave it as a literal placeholder for now; in Phase 1 you can remove it
 # and inject raw policy text later.
 
-LOAN_OFFICER_SYSTEM = """
-TODO (Phase 1): Write the system prompt.
 
-Required elements:
-1. Role definition    — Apex Bank loan intake officer
-2. Question sequence  — collect in this order:
-     applicant_type → annual_income_inr → loan_type → loan_amount →
-     property_details (home loans only) → customer_id → documents → existing_emis
-3. Style rules        — plain English, one question at a time, no jargon
-4. Policy citation    — whenever you state an eligibility rule, cite [Policy Section X.Y]
-5. Hard constraint    — do NOT state a preliminary_decision before all fields are collected
+LOAN_OFFICER_SYSTEM = """You are an Apex Bank loan intake officer.
+    Ask one plain-English question at a time, without jargon. Collect in order:
+    applicant type, annual income, loan type, requested amount, property details
+    (home loans only), customer ID, documents, existing EMIs.
+    Do not give a preliminary decision until all applicable data is collected.
+    Cite [Policy Section X.Y] for every eligibility rule. Never invent rules.
 
-Hint: The {policy_context} placeholder below is replaced at runtime in Phase 4.
-Leave it here even in Phase 1 — the .format() call in run_intake_conversation()
-will substitute it (or you can pass an empty string).
-
-Relevant policy context:
-{policy_context}
-"""
+    Policy:
+    {policy_context}"""
 
 
 def estimate_cost(input_tokens: int, output_tokens: int) -> float:
@@ -168,7 +164,9 @@ def estimate_cost(input_tokens: int, output_tokens: int) -> float:
     - Output rate: $15.00 per 1M tokens
     - Return the sum
     """
-    raise NotImplementedError("Phase 1 ▸ implement estimate_cost()")
+    input_cost = input_tokens * 3.00 / 1_000_000
+    output_cost = output_tokens * 15.00 / 1_000_000
+    return input_cost + output_cost
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -189,19 +187,24 @@ class LoanApplicationRecord(BaseModel):
     - Remember: in Pydantic v2, @classmethod must appear ABOVE @field_validator
     """
 
-    applicant_name:             Any   # str
-    applicant_type:             Any   # Literal["salaried", "self_employed", "government"]
-    annual_income_inr:          Any   # float
-    loan_type:                  Any   # Literal["home", "personal", "business", "vehicle"]
-    loan_amount_requested_inr:  Any   # float
-    existing_emi_inr:           Any   # float
-    dti_ratio:                  Any   # float — computed: (existing_emi + new_emi_est) / (annual_income/12)
-    credit_score:               Any   # Optional[int] — None when bureau is unavailable
-    documents_verified:         Any   # bool
-    preliminary_decision:       Any   # Literal["proceed", "refer_to_committee", "decline"]
-    policy_basis:               Any   # str — must contain actual [Policy Section X.Y] references
+    applicant_name:             str
+    applicant_type:             Literal["salaried", "self_employed", "government"]
+    annual_income_inr:          float
+    loan_type:                  Literal["home", "personal", "business", "vehicle"]
+    loan_amount_requested_inr:  float
+    existing_emi_inr:           float
+    dti_ratio:                  float  # computed: (existing_emi + new_emi_est) / (annual_income/12)
+    credit_score:               Optional[int]  # None when bureau is unavailable
+    documents_verified:         bool
+    preliminary_decision:       Literal["proceed", "refer_to_committee", "decline"]
+    policy_basis:               str  # must contain actual [Policy Section X.Y] references
 
-    # TODO: add @field_validator("dti_ratio") that raises ValueError if value <= 0
+    @field_validator("dti_ratio")
+    @classmethod
+    def validate_dti_ratio(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("dti_ratio must be positive")
+        return value
 
 
 class ConversationManager:
@@ -225,17 +228,48 @@ class ConversationManager:
     """
 
     def __init__(self, client: anthropic.Anthropic, system: str) -> None:
-        raise NotImplementedError("Phase 2 ▸ implement ConversationManager.__init__()")
+        self.client = client
+        self.system = system
+        self.messages: list[dict] = []
+
 
     def send(self, user_message: str) -> str:
-        raise NotImplementedError("Phase 2 ▸ implement ConversationManager.send()")
+        self.messages.append({"role": "user", "content": user_message})
+        response = self.client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=self.system,
+            messages=self.messages,
+        )
+        reply = "".join(block.text for block in response.content if block.type == "text")
+        self.messages.append({"role": "assistant", "content": response.content})  # append full list, not just .text
+        return reply
 
     def token_count(self) -> int:
-        raise NotImplementedError("Phase 2 ▸ implement ConversationManager.token_count()")
-
+        count = self.client.messages.count_tokens(
+            model=MODEL,
+            system=self.system,
+            messages=self.messages,
+        )
+        return count.input_tokens
+    
     def summarise_and_reset(self) -> str:
-        raise NotImplementedError("Phase 2 ▸ implement ConversationManager.summarise_and_reset()")
-
+        history_text = "\n".join(
+            f"{msg['role'].capitalize()}: {msg['content']}" for msg in self.messages
+        )
+        summary_prompt = (
+            "Please summarise the following conversation in 150 words or less, "
+            "preserving all collected fields:\n\n" + history_text
+        )
+        response = self.client.messages.create(
+            model=MODEL,
+            max_tokens=512,
+            system=self.system,
+            messages=[{"role": "user", "content": summary_prompt}],
+        )
+        summary = "".join(block.text for block in response.content if block.type == "text")
+        self.messages = [{"role": "user", "content": f"[Summary]\n{summary}"}]
+        return summary
 
 def extract_application_record(
     client: anthropic.Anthropic,
@@ -256,7 +290,44 @@ def extract_application_record(
 
     Hint: reference day2/loan_application_extractor.py for the retry loop pattern
     """
-    raise NotImplementedError("Phase 2 ▸ implement extract_application_record()")
+    messages = list(conversation_history)
+    messages.append({
+        "role": "user",
+        "content": (
+            "Extract all collected loan application information into a "
+            "LoanApplicationRecord. Return values matching the schema exactly.\n\n"
+            "Calculate dti_ratio as:\n"
+            "(existing_emi_inr + estimated new monthly EMI) / monthly income.\n\n"
+            #"Use only policy sections supported by the conversation and policy "
+            #"context. Do not invent policy references.\n\n"
+            f"Policy context:\n{policy_context or 'No policy context provided.'}"
+        ),
+    })
+
+    for attempt in range(MAX_PARSE_RETRIES + 1):
+        try:
+            response = client.messages.parse(
+                model=MODEL,
+                max_tokens=1024,
+                temperature=0,
+                messages=messages,
+                output_format=LoanApplicationRecord,
+            )
+            return response.parsed_output
+
+        except ValidationError as error:
+            if attempt == MAX_PARSE_RETRIES:
+                raise
+
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Your previous output failed schema validation:\n"
+                    f"{error}\n\n"
+                    "Correct the invalid fields and return a JSON object "
+                    "matching LoanApplicationRecord exactly."
+                ),
+            })
 
 
 def run_intake_conversation(
@@ -277,8 +348,31 @@ def run_intake_conversation(
       separately — or do a single count_tokens() call at the end as an approximation)
     - Return (manager.messages, total_cost)
     """
-    raise NotImplementedError("Phase 2 ▸ implement run_intake_conversation()")
+    system_prompt = LOAN_OFFICER_SYSTEM.format(
+        policy_context=policy_context or "No policy context provided."
+    )
+    manager = ConversationManager(client, system_prompt)
 
+    compacted_input_tokens = 0
+
+    for turn_index, turn in enumerate(turns):
+        reply = manager.send(turn)
+        print(f"\n  Loan officer: {reply}")
+
+        if turn_index == 5:
+            running_tokens = manager.token_count()
+            print(f"\n  Running token count: {running_tokens:,}")
+
+            if running_tokens > TOKEN_COMPACT_THRESHOLD:
+                compacted_input_tokens += running_tokens
+                summary = manager.summarise_and_reset()
+                print(f"\n  Conversation summary:\n{summary}")
+
+    final_input_tokens = manager.token_count()
+    approximate_input_tokens = compacted_input_tokens + final_input_tokens
+    total_cost = estimate_cost(approximate_input_tokens, 0)
+
+    return manager.messages, total_cost
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 3 — Tool Integration (Day 3 skills)
@@ -529,7 +623,8 @@ def run_evaluation(
 def main() -> None:
     # ── Phase 1: Initialise ────────────────────────────────────────────────────
     client = make_client()
-    tools = build_tools()           # Phase 3 — safe to call empty list until then
+    #tools = build_tools()         # to be uncommented after developing ph3 # Phase 3 — safe to call empty list until then
+    tools: list[dict] = []  # to be removed after developing ph3 # 
 
     # ── Phase 4: Build policy index ───────────────────────────────────────────
     # Comment this block out until Phase 4 is implemented:
@@ -554,8 +649,9 @@ def main() -> None:
     print(f"\n  Estimated cost: ${cost:.4f}")
 
     # Phase 3: enrich with tool calls
-    messages = run_agentic_loop(client, history, tools)
-
+    #messages = run_agentic_loop(client, history, tools)  # to be uncommented after developing ph3 
+    messages = list(history)  # to be removed after developing ph3
+    
     # Phase 2: extract the validated record
     record = extract_application_record(client, messages, policy_context)
     print(f"\n  Decision : {record.preliminary_decision}")
