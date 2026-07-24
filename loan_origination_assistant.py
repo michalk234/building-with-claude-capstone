@@ -51,7 +51,12 @@ CUSTOMER_DB = {
 DOCUMENTS_DB = {
     ("aadhaar", "AADHAAR-1234"): {"valid": True,  "expiry_date": "N/A",    "reason": "Valid Aadhaar"},
     ("pan",     "PAN-ABCDE1234F"): {"valid": True, "expiry_date": "N/A",    "reason": "Valid PAN"},
+    ("pan",     "PAN-CDEFG3456H"): {"valid": True, "expiry_date": "N/A",    "reason": "Valid PAN"},
+    ("pan",     "PAN-DEFGH4567J"): {"valid": True, "expiry_date": "N/A",    "reason": "Valid PAN"},
+    ("pan",     "PAN-BCDF2345G"): {"valid": True, "expiry_date": "N/A",    "reason": "Valid PAN"},
     ("salary_slip", "SAL-MAY26"): {"valid": True,  "expiry_date": "2026-08-31", "reason": "Current pay slip"},
+    ("salary_slip", "SAL-JUN26"): {"valid": True,  "expiry_date": "2026-09-31", "reason": "Current pay slip"},
+    ("salary_slip", "SAL-APR26"): {"valid": True,  "expiry_date": "2026-07-31", "reason": "Current pay slip"},
     ("aadhaar", "AADHAAR-EXPIRED"): {"valid": False, "expiry_date": "2024-01-01", "reason": "Expired document"},
 }
 
@@ -77,7 +82,7 @@ TEST_SCENARIOS = [
             "I want a personal loan of 5 lakhs.",
             "Name is Sunita Rao, self-employed consultant.",
             "Annual income around 6 lakhs. Customer ID CUST-002.",
-            "Aadhaar: AADHAAR-1234, PAN: PAN-ABCDE1234F.",
+            "Aadhaar: AADHAAR-1234, PAN: PAN-BCDEF2345G.",
         ],
         "expected_decision": "decline",
         "expected_policy_sections": ["Section 2.3", "Section 4.2"],
@@ -89,7 +94,7 @@ TEST_SCENARIOS = [
             "I need a business loan for my company.",
             "Arun Mehta, salaried director. Annual income 12 lakhs.",
             "Loan amount: 80 lakhs. Customer ID CUST-003.",
-            "PAN: PAN-ABCDE1234F, Aadhaar: AADHAAR-1234.",
+            "PAN: PAN-CDEFG3456H, Aadhaar: AADHAAR-1234.",
         ],
         "expected_decision": "refer_to_committee",
         "expected_policy_sections": ["Section 5.1"],
@@ -100,7 +105,7 @@ TEST_SCENARIOS = [
         "conversation": [
             "Home loan application. I'm Priya Nair, government employee.",
             "Annual income 8 lakhs. Loan amount 30 lakhs.",
-            "Customer ID: CUST-004. Aadhaar: AADHAAR-1234, PAN: PAN-ABCDE1234F.",
+            "Customer ID: CUST-004. Aadhaar: AADHAAR-1234, PAN: PAN-DEFGH4567J.",
         ],
         "expected_decision": "refer_to_committee",
         "expected_policy_sections": ["Section 4.1"],
@@ -299,8 +304,8 @@ def extract_application_record(
             "LoanApplicationRecord. Return values matching the schema exactly.\n\n"
             "Calculate dti_ratio as:\n"
             "(existing_emi_inr + estimated new monthly EMI) / monthly income.\n\n"
-            #"Use only policy sections supported by the conversation and policy "
-            #"context. Do not invent policy references.\n\n"
+            "Use only policy sections supported by the conversation and policy "
+            "context. Do not invent policy references.\n\n"
             f"Policy context:\n{policy_context or 'No policy context provided.'}"
         ),
     })
@@ -384,7 +389,12 @@ def run_intake_conversation(
 def _check_credit_score(pan_number: str) -> dict:
     """Look up a CIBIL score by PAN. Returns None score when bureau is down."""
     # Map PAN → customer for demo; in production this hits the bureau API
-    pan_to_customer = {"PAN-ABCDE1234F": "CUST-001"}  # extended in real data
+    pan_to_customer = {
+        "PAN-ABCDE1234F": "CUST-001",
+        "PAN-BCDEF2345G": "CUST-002",
+        "PAN-CDEFG3456H": "CUST-003",
+        "PAN-DEFGH4567J": "CUST-004",
+    }
     customer_id = pan_to_customer.get(pan_number)
     if not customer_id:
         return {"error": f"PAN {pan_number} not found in bureau records."}
@@ -792,15 +802,17 @@ def retrieve_policy_context(query: str, store: object, top_k: int = TOP_K_CHUNKS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 FAITHFULNESS_JUDGE_SYSTEM = """
-TODO (Phase 5): Write the faithfulness judge system prompt.
+You are the evaluator of Apex Bank loan assessments.
 
-It should instruct Claude to:
-- Score 1–5 how well the preliminary_decision and policy_basis are supported
-  by the provided policy context (1 = hallucinated, 5 = fully grounded)
-- Return JSON: {"score": <int>, "reasoning": "<str>"}
-- Not penalise for style, only for unsupported factual claims
+Evaluate only whether the preliminary_decision and policy_basis are supported
+by the supplied policy context. Do not evaluate writing style.
+
+Score faithfulness from 1 to 5:
+where 1 = hallucinated, 5 = fully grounded, 2,3,4 are in between growing gradually.
+
+Return only valid JSON in this exact shape:
+{"score": <integer from 1 to 5>, "reasoning": "<brief explanation>"}
 """
-
 
 def judge_faithfulness(
     client: anthropic.Anthropic,
@@ -818,8 +830,67 @@ def judge_faithfulness(
     - Return the parsed dict {"score": int, "reasoning": str}
     - On any parse error, return {"score": 0, "reasoning": "parse error: <raw text>"}
     """
-    raise NotImplementedError("Phase 5 ▸ implement judge_faithfulness()")
+    user_prompt = (
+        "Evaluate the following loan assessment against the retrieved "
+        "policy context.\n\n"
+        "[Policy Context]\n"
+        f"{policy_context}\n\n"
+        "[Loan Assessment]\n"
+        f"preliminary_decision: {record.preliminary_decision}\n"
+        f"policy_basis: {record.policy_basis}"
+    )
 
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=512,
+        temperature=0,
+        system=FAITHFULNESS_JUDGE_SYSTEM,
+        messages=[
+            {
+                "role": "user",
+                "content": user_prompt,
+            }
+        ],
+    )
+
+    raw_text = "".join(
+        block.text
+        for block in response.content
+        if block.type == "text"
+    ).strip()
+
+    request_id = getattr(response, "_request_id", "unknown")
+
+    fenced_json = re.search(
+        r"```(?:json)?\s*(\{[\s\S]*?\})\s*```",
+        raw_text,
+    )
+    json_text = (
+        fenced_json.group(1)
+        if fenced_json
+        else raw_text
+    )
+
+    try:
+        result = json.loads(json_text)
+        score = int(result["score"])
+        reasoning = str(result["reasoning"])
+
+        if score not in range(1, 6):
+            raise ValueError("score must be between 1 and 5")
+
+        return {
+            "score": score,
+            "reasoning": reasoning,
+            "request_id": request_id,
+        }
+
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return {
+            "score": 0,
+            "reasoning": f"parse error: {raw_text}",
+            "request_id": request_id,
+        }
 
 def evaluate_tool_correctness(
     expected_tools: list[str],
@@ -833,8 +904,31 @@ def evaluate_tool_correctness(
     - Return len(called & set(expected_tools)) / len(expected_tools)
       (proportion of expected tools that were actually called)
     """
-    raise NotImplementedError("Phase 5 ▸ implement evaluate_tool_correctness()")
+    expected = set(expected_tools)
 
+    if not expected:
+        return 1.0
+
+    called = set()
+
+    for message in messages:
+        content = message.get("content", [])
+
+        if not isinstance(content, list):
+            continue
+
+        for block in content:
+            if isinstance(block, dict):
+                block_type = block.get("type")
+                block_name = block.get("name")
+            else:
+                block_type = getattr(block, "type", None)
+                block_name = getattr(block, "name", None)
+
+            if block_type == "tool_use" and block_name:
+                called.add(block_name)
+
+    return len(called & expected) / len(expected)    
 
 def log_eval_result(record: dict) -> None:
     """Append one evaluation result as a JSON line to EVAL_LOG_PATH.
@@ -844,8 +938,22 @@ def log_eval_result(record: dict) -> None:
     - EVAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     - Open EVAL_LOG_PATH in append mode and write json.dumps(record) + "\\n"
     """
-    raise NotImplementedError("Phase 5 ▸ implement log_eval_result()")
+    record["timestamp"] = datetime.datetime.now(
+        datetime.timezone.utc
+    ).isoformat() 
 
+    EVAL_LOG_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with EVAL_LOG_PATH.open(
+        mode="a",
+        encoding="utf-8",
+    ) as log_file:
+        log_file.write(
+            json.dumps(record, ensure_ascii=False) + "\n"
+        )    
 
 def run_evaluation(
     client: anthropic.Anthropic,
@@ -872,8 +980,101 @@ def run_evaluation(
 
     - Print "Overall: N/4 PASS" at the end
     """
-    raise NotImplementedError("Phase 5 ▸ implement run_evaluation()")
+    passed_scenarios = 0
+    expected_tools = [
+        "check_credit_score",
+        "validate_documents",
+        "lookup_existing_account",
+    ]
 
+    for scenario, golden in zip(
+        TEST_SCENARIOS,
+        EVAL_GOLDEN_SET,
+    ):
+        if scenario["id"] != golden["scenario_id"]:
+            raise ValueError(
+                "Scenario and golden-set IDs do not match: "
+                f"{scenario['id']} != {golden['scenario_id']}"
+            )
+
+        policy_context = retrieve_policy_context(
+            scenario["description"],
+            store,
+        )
+
+        history, cost = run_intake_conversation(
+            client,
+            scenario["conversation"],
+            policy_context,
+        )
+
+        messages = run_agentic_loop(
+            client,
+            history,
+            tools,
+        )
+
+        application_record = extract_application_record(
+            client,
+            messages,
+            policy_context,
+        )
+
+        faithfulness = judge_faithfulness(
+            client,
+            policy_context,
+            application_record,
+        )
+
+        tool_score = evaluate_tool_correctness(
+            expected_tools,
+            messages,
+        )
+
+        decision_correct = (
+            application_record.preliminary_decision
+            == golden["ground_truth_decision"]
+        )
+
+        scenario_passed = (
+            faithfulness["score"] >= 4
+            and tool_score == 1.0
+            and decision_correct
+        )
+
+        if scenario_passed:
+            passed_scenarios += 1
+
+        log_eval_result({
+            "request_id": faithfulness["request_id"],
+            "scenario_id": scenario["id"],
+            "faithfulness": faithfulness["score"],
+            "faithfulness_reasoning": faithfulness["reasoning"],
+            "tool_correctness": tool_score,
+            "decision_correct": decision_correct,
+            "expected_decision": golden["ground_truth_decision"],
+            "actual_decision": application_record.preliminary_decision,
+            "required_policy_sections": golden["required_sections"],
+            "policy_basis": application_record.policy_basis,
+            "estimated_cost_usd": cost,
+            "passed": scenario_passed,
+        })
+
+        result_label = "PASS" if scenario_passed else "FAIL"
+        decision_label = "✓" if decision_correct else "✗"
+
+        print(
+            f"Scenario {scenario['id']}: "
+            f"faithfulness={faithfulness['score']}, "
+            f"tool_correctness={tool_score:.1f}, "
+            f"decision={decision_label} "
+            f"→ {result_label}"
+        )
+
+    print(
+        f"Overall: {passed_scenarios}/"
+        f"{len(TEST_SCENARIOS)} PASS"
+    )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ORCHESTRATION — wire all phases together
@@ -893,31 +1094,31 @@ def main() -> None:
     policy_context = ""
 
     # ── Run one scenario end-to-end ────────────────────────────────────────────
-    scenario = TEST_SCENARIOS[0]
-    print(f"\n{'='*60}")
-    print(f"Running: {scenario['description']}")
-    print("=" * 60)
+    # scenario = TEST_SCENARIOS[0]
+    # print(f"\n{'='*60}")
+    # print(f"Running: {scenario['description']}")
+    # print("=" * 60)
 
-    # Phase 4: replace with retrieve_policy_context(scenario["description"], store)
-    if store is not None:
-        policy_context = retrieve_policy_context(scenario["description"], store)
+    # # Phase 4: replace with retrieve_policy_context(scenario["description"], store)
+    # if store is not None:
+    #     policy_context = retrieve_policy_context(scenario["description"], store)
 
-    # Phase 2: drive the intake conversation
-    history, cost = run_intake_conversation(client, scenario["conversation"], policy_context)
-    print(f"\n  Estimated cost: ${cost:.4f}")
+    # # Phase 2: drive the intake conversation
+    # history, cost = run_intake_conversation(client, scenario["conversation"], policy_context)
+    # print(f"\n  Estimated cost: ${cost:.4f}")
 
-    # Phase 3: enrich with tool calls
-    messages = run_agentic_loop(client, history, tools)  
+    # # Phase 3: enrich with tool calls
+    # messages = run_agentic_loop(client, history, tools)  
 
-    # Phase 2: extract the validated record
-    record = extract_application_record(client, messages, policy_context)
-    print(f"\n  Decision : {record.preliminary_decision}")
-    print(f"  Policy   : {record.policy_basis}")
-    print(f"  DTI      : {record.dti_ratio:.1%}")
+    # # Phase 2: extract the validated record
+    # record = extract_application_record(client, messages, policy_context)
+    # print(f"\n  Decision : {record.preliminary_decision}")
+    # print(f"  Policy   : {record.policy_basis}")
+    # print(f"  DTI      : {record.dti_ratio:.1%}")
 
     # ── Phase 5: Run full evaluation ──────────────────────────────────────────
     # Uncomment when Phase 5 is ready:
-    # run_evaluation(client, store, tools)
+    run_evaluation(client, store, tools)
 
 
 if __name__ == "__main__":
