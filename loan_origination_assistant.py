@@ -1076,6 +1076,243 @@ def run_evaluation(
         f"{len(TEST_SCENARIOS)} PASS"
     )
 
+def run_interactive_assessment(
+    client: anthropic.Anthropic,
+    conversation_history: list[dict],
+    tools: list[dict],
+    policy_context: str,
+) -> tuple[list[dict], str]:
+    """Run bank tools and produce a customer-facing preliminary assessment."""
+
+    messages = list(conversation_history)
+    messages.append({
+        "role": "user",
+        "content": (
+            "The applicant has finished providing information. "
+            "Use the available tools to check the credit score, validate every "
+            "provided document, and inspect the existing Apex Bank account. "
+            "After receiving the tool results, provide a clear customer-facing "
+            "preliminary recommendation. Cite the relevant policy sections and "
+            "make clear that this is not final credit approval."
+        ),
+    })
+
+    assessment_system = (
+        LOAN_OFFICER_SYSTEM.format(
+            policy_context=policy_context or "No policy context provided."
+        )
+        + """
+
+You are now completing the preliminary assessment.
+Use the internal tools before recommending an outcome.
+Base the recommendation only on the conversation, tool results, and supplied
+policy context. Reply in the same language as the applicant.
+"""
+    )
+
+    while True:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            temperature=0,
+            system=assessment_system,
+            tools=tools,
+            messages=messages,
+        )
+
+        messages.append({
+            "role": "assistant",
+            "content": response.content,
+        })
+
+        if response.stop_reason == "end_turn":
+            final_text = "".join(
+                block.text
+                for block in response.content
+                if block.type == "text"
+            )
+            return messages, final_text
+
+        tool_uses = [
+            block
+            for block in response.content
+            if block.type == "tool_use"
+        ]
+
+        if not tool_uses:
+            raise RuntimeError(
+                "Assessment stopped without a final response or a tool call."
+            )
+
+        tool_results = []
+
+        for block in tool_uses:
+            print(f"\n  Internal bank check: {block.name}")
+            print(f"  Input: {block.input}")
+
+            tool_function = TOOL_FN_MAP.get(block.name)
+
+            if tool_function is None:
+                result = {
+                    "error": f"Unknown bank tool: {block.name}"
+                }
+            else:
+                try:
+                    result = tool_function(**block.input)
+                except Exception as error:
+                    result = {
+                        "error": f"Tool execution failed: {error}"
+                    }
+
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": json.dumps(result),
+                "is_error": "error" in result,
+            })
+
+        messages.append({
+            "role": "user",
+            "content": tool_results,
+        })
+
+
+def run_interactive_application(
+    client: anthropic.Anthropic,
+    store: object,
+    tools: list[dict],
+) -> Optional[LoanApplicationRecord]:
+    """Let a real user complete a loan intake from the terminal."""
+
+    initial_policy_context = ""
+
+    if store is not None:
+        initial_policy_context = retrieve_policy_context(
+            (
+                "Loan application intake requirements: applicant type, income, "
+                "loan amount, property, documents and existing liabilities."
+            ),
+            store,
+        )
+
+    interactive_system = (
+        LOAN_OFFICER_SYSTEM.format(
+            policy_context=(
+                initial_policy_context
+                or "No policy context provided."
+            )
+        )
+        + """
+
+This is a live conversation with a bank customer.
+Reply in the same language as the customer.
+Ask exactly one question at a time.
+Do not ask for information the customer has already provided.
+Do not ask the customer to calculate DTI or make a credit decision.
+When all applicable intake information has been collected, tell the customer
+that the application is ready and ask them to enter /submit.
+"""
+    )
+
+    manager = ConversationManager(client, interactive_system)
+
+    print("\n" + "=" * 60)
+    print("APEX BANK — INTERACTIVE LOAN APPLICATION")
+    print("=" * 60)
+    print("Describe what loan you need to begin.")
+    print("Commands: /submit — assess application, /quit — exit")
+    print("=" * 60)
+
+    while True:
+        try:
+            user_message = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nApplication session closed.")
+            return None
+
+        command = user_message.lower()
+
+        if command == "/quit":
+            print("Application session closed.")
+            return None
+
+        if command == "/submit":
+            if not manager.messages:
+                print(
+                    "\nBank: Please tell me what loan you are interested in "
+                    "before submitting the application."
+                )
+                continue
+            break
+
+        if not user_message:
+            continue
+
+        reply = manager.send(user_message)
+        print(f"\nBank: {reply}")
+
+        running_tokens = manager.token_count()
+
+        if running_tokens > TOKEN_COMPACT_THRESHOLD:
+            manager.summarise_and_reset()
+            print("\n[The conversation was compacted to preserve context.]")
+
+    retrieval_parts = []
+
+    for message in manager.messages:
+        if message.get("role") != "user":
+            continue
+
+        content = message.get("content")
+
+        if isinstance(content, str):
+            retrieval_parts.append(content)
+
+    retrieval_query = "\n".join(retrieval_parts)
+
+    policy_context = initial_policy_context
+
+    if store is not None:
+        policy_context = retrieve_policy_context(
+            retrieval_query or "Loan application eligibility assessment",
+            store,
+        )
+
+    print("\nBank: Thank you. I am checking your application now...")
+
+    messages, recommendation = run_interactive_assessment(
+        client,
+        manager.messages,
+        tools,
+        policy_context,
+    )
+
+    record = extract_application_record(
+        client,
+        messages,
+        policy_context,
+    )
+
+    print("\n" + "=" * 60)
+    print("PRELIMINARY RECOMMENDATION")
+    print("=" * 60)
+    print(recommendation)
+    print("\nApplication summary:")
+    print(f"  Applicant: {record.applicant_name}")
+    print(f"  Loan type: {record.loan_type}")
+    print(f"  Requested amount: INR {record.loan_amount_requested_inr:,.2f}")
+    print(f"  Decision: {record.preliminary_decision}")
+    print(f"  DTI: {record.dti_ratio:.1%}")
+    print(
+        "  Credit score: "
+        f"{record.credit_score if record.credit_score is not None else 'unavailable'}"
+    )
+    print(f"  Documents verified: {record.documents_verified}")
+    print(f"  Policy basis: {record.policy_basis}")
+    print("=" * 60)
+
+    return record
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ORCHESTRATION — wire all phases together
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1089,36 +1326,58 @@ def main() -> None:
     # Comment this block out until Phase 4 is implemented:
     store = build_policy_index()
 
+    print("\nChoose application mode:")
+    print("  1. Interactive customer conversation")
+    print("  2. Run the existing demo scenario")
+    print("  3. Run full evaluation")
+    print("  q. Quit")
+
+    mode = input("\nMode [1]: ").strip().lower()
+
+    if mode in {"", "1", "interactive", "i"}:
+        run_interactive_application(client, store, tools)
+        return
+
+    if mode in {"3", "evaluation", "eval", "e"}:
+        run_evaluation(client, store, tools)
+        return
+
+    if mode in {"q", "quit", "exit"}:
+        return
+
+    if mode not in {"2", "demo", "d"}:
+        print("Unknown mode. Running the existing demo scenario.")
+        
     # For Phase 1–3, use an empty policy context:
     #store = None
     policy_context = ""
 
     # ── Run one scenario end-to-end ────────────────────────────────────────────
-    # scenario = TEST_SCENARIOS[0]
-    # print(f"\n{'='*60}")
-    # print(f"Running: {scenario['description']}")
-    # print("=" * 60)
+    scenario = TEST_SCENARIOS[0]
+    print(f"\n{'='*60}")
+    print(f"Running: {scenario['description']}")
+    print("=" * 60)
 
-    # # Phase 4: replace with retrieve_policy_context(scenario["description"], store)
-    # if store is not None:
-    #     policy_context = retrieve_policy_context(scenario["description"], store)
+    # Phase 4: replace with retrieve_policy_context(scenario["description"], store)
+    if store is not None:
+        policy_context = retrieve_policy_context(scenario["description"], store)
 
-    # # Phase 2: drive the intake conversation
-    # history, cost = run_intake_conversation(client, scenario["conversation"], policy_context)
-    # print(f"\n  Estimated cost: ${cost:.4f}")
+    # Phase 2: drive the intake conversation
+    history, cost = run_intake_conversation(client, scenario["conversation"], policy_context)
+    print(f"\n  Estimated cost: ${cost:.4f}")
 
-    # # Phase 3: enrich with tool calls
-    # messages = run_agentic_loop(client, history, tools)  
+    # Phase 3: enrich with tool calls
+    messages = run_agentic_loop(client, history, tools)  
 
-    # # Phase 2: extract the validated record
-    # record = extract_application_record(client, messages, policy_context)
-    # print(f"\n  Decision : {record.preliminary_decision}")
-    # print(f"  Policy   : {record.policy_basis}")
-    # print(f"  DTI      : {record.dti_ratio:.1%}")
+    # Phase 2: extract the validated record
+    record = extract_application_record(client, messages, policy_context)
+    print(f"\n  Decision : {record.preliminary_decision}")
+    print(f"  Policy   : {record.policy_basis}")
+    print(f"  DTI      : {record.dti_ratio:.1%}")
 
     # ── Phase 5: Run full evaluation ──────────────────────────────────────────
     # Uncomment when Phase 5 is ready:
-    run_evaluation(client, store, tools)
+    #run_evaluation(client, store, tools)
 
 
 if __name__ == "__main__":
